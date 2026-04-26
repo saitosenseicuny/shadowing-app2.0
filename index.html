@@ -548,152 +548,142 @@ function setStatus(msg, state) {
 }
 
 async function startSession() {
+  transcribedText = '';
+  recordedBlob = null;
+  recordedChunks = [];
+  isRecording = true;
+
+  // UI: enable stop, disable start
   document.getElementById('btn-start').disabled = true;
   document.getElementById('btn-stop').disabled = false;
   document.getElementById('btn-replay').disabled = true;
-  transcribedText = '';
-  recordedBlob = null;
 
-  await startRecording();
-
-  if(currentTab==='tts' && targetText) {
-    speakText(targetText);
-  } else if(uploadedAudio) {
-    uploadedAudio.currentTime = 0;
-    uploadedAudio.play();
-    uploadedAudio.onended = () => stopSession();
-    setStatus('再生中 ＋ 録音中…', 'recording');
-  }
-}
-
-function speakText(text) {
-  synth.cancel();
-  utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = currentLang==='ja' ? 'ja-JP' : 'en-US';
-  utterance.rate = parseFloat(document.getElementById('speed-slider').value);
-  let wordIdx = 0;
-  utterance.onboundary = (e) => {
-    if(e.name==='word' && wordIdx < wordSpans.length) {
-      wordSpans.forEach((sp,i) => {
-        sp.classList.toggle('highlighted', i===wordIdx);
-        if(i < wordIdx) sp.classList.add('done');
-      });
-      wordIdx++;
-    }
-  };
-  utterance.onend = () => { wordSpans.forEach(sp=>{sp.classList.remove('highlighted');sp.classList.add('done');}); stopSession(); };
-  utterance.onerror = () => stopSession();
-  isRecording = true;
-  setStatus('再生中 ＋ 録音中…', 'recording');
-  synth.speak(utterance);
-}
-
-async function startRecording() {
-  recordedChunks = [];
-  transcribedText = '';
-
-  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-    setStatus('このブラウザは音声認識に対応していません（Chrome推奨）', '');
-    return;
-  }
-
-  // Step 1: Get mic stream first (for recording)
-  let stream = null;
+  // 1) Start microphone recording
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch(err) {
-    setStatus('マイクへのアクセスが拒否されました。ブラウザのアドレスバー横の🔒からマイクを許可してください。', '');
-    return;
-  }
-
-  // Step 2: Set up MediaRecorder on the stream
-  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(stream);
-    mediaRecorder.ondataavailable = e => { if(e.data.size>0) recordedChunks.push(e.data); };
-    mediaRecorder.start(200);
-  } catch(err) {
-    console.warn('MediaRecorder failed:', err);
-  }
-
-  // Step 3: Speech recognition — uses its OWN mic access independently
-  // Important: start recognition AFTER MediaRecorder so they don't conflict
-  setTimeout(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognition = new SR();
-    recognition.lang = currentLang==='ja' ? 'ja-JP' : 'en-US';
-    recognition.continuous = true;
-    recognition.interimResults = false; // final results only = more reliable
-    recognition.maxAlternatives = 1;
-    recognition.onresult = (e) => {
-      for(let i=e.resultIndex; i<e.results.length; i++) {
-        if(e.results[i].isFinal) {
-          transcribedText += e.results[i][0].transcript;
-        }
-      }
-      // Show live feedback
-      setStatus('認識中: ' + transcribedText.slice(-20) + '…', 'recording');
-    };
-    recognition.onerror = (e) => {
-      console.warn('Recognition error:', e.error);
-      if(e.error === 'no-speech') {
-        // restart silently on no-speech
-        try { recognition.start(); } catch(ex){}
-      }
-    };
-    recognition.onend = () => {
-      // Auto-restart if still recording (handles Chrome's 60s limit)
-      if(isRecording) {
-        try { recognition.start(); } catch(ex){}
-      }
-    };
-    try { recognition.start(); } catch(e){ console.warn('Recognition start error:', e); }
-  }, 300);
-}
-
-function stopSession() {
-  synth.cancel();
-  isRecording = false;
-  if(uploadedAudio) { uploadedAudio.pause(); uploadedAudio.currentTime=0; }
-
-  // Stop recognition and wait for final onend before scoring
-  if(recognition) {
-    const rec = recognition;
-    recognition = null;
-    rec.onend = () => finishSession();
-    rec.onerror = () => finishSession();
-    try { rec.stop(); } catch(e) { finishSession(); }
-  } else {
-    finishSession();
-  }
-
-  // Stop MediaRecorder — set onstop BEFORE stop()
-  if(mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.ondataavailable = e => { if(e.data.size > 0) recordedChunks.push(e.data); };
     mediaRecorder.onstop = () => {
       if(recordedChunks.length > 0) {
-        recordedBlob = new Blob(recordedChunks, { type: 'audio/webm' });
-        const url = URL.createObjectURL(recordedBlob);
+        const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(blob);
         const audioEl = document.getElementById('recorded-audio');
         audioEl.src = url;
         audioEl.load();
         document.getElementById('recorded-audio-section').style.display = 'block';
       }
     };
+    mediaRecorder.start(500);
+  } catch(err) {
+    setStatus('マイクへのアクセスが拒否されました。アドレスバー横の🔒からマイクを許可してください。', '');
+    isRecording = false;
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-stop').disabled = true;
+    return;
+  }
+
+  // 2) Start speech recognition
+  startSpeechRecognition();
+
+  // 3) Play TTS or uploaded audio
+  if(currentTab === 'tts' && targetText) {
+    setStatus('🔴 録音中 ＋ 再生中… 終わったら「停止」を押してください', 'recording');
+    speakText(targetText);
+  } else if(uploadedAudio) {
+    setStatus('🔴 録音中 ＋ 再生中… 終わったら「停止」を押してください', 'recording');
+    uploadedAudio.currentTime = 0;
+    uploadedAudio.play();
+  }
+}
+
+function startSpeechRecognition() {
+  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  recognition.onresult = (e) => {
+    let finalText = '';
+    let interimText = '';
+    for(let i = 0; i < e.results.length; i++) {
+      if(e.results[i].isFinal) finalText += e.results[i][0].transcript;
+      else interimText += e.results[i][0].transcript;
+    }
+    transcribedText = finalText;
+    const display = finalText + interimText;
+    if(display) setStatus('🔴 認識中: ' + display.slice(-30) + '…', 'recording');
+  };
+
+  recognition.onerror = (e) => {
+    if(e.error !== 'no-speech') console.warn('Recognition error:', e.error);
+  };
+
+  recognition.onend = () => {
+    // If still recording, restart automatically
+    if(isRecording && recognition) {
+      try { recognition.start(); } catch(ex) {}
+    }
+  };
+
+  try { recognition.start(); } catch(e) {}
+}
+
+function speakText(text) {
+  synth.cancel();
+  utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
+  utterance.rate = parseFloat(document.getElementById('speed-slider').value);
+
+  let wordIdx = 0;
+  utterance.onboundary = (e) => {
+    if(e.name === 'word' && wordIdx < wordSpans.length) {
+      wordSpans.forEach((sp, i) => {
+        sp.classList.toggle('highlighted', i === wordIdx);
+        if(i < wordIdx) sp.classList.add('done');
+      });
+      wordIdx++;
+    }
+  };
+  // TTS ending does NOT auto-stop — user must press 停止
+  utterance.onend = () => {
+    wordSpans.forEach(sp => { sp.classList.remove('highlighted'); sp.classList.add('done'); });
+    setStatus('🔴 再生終了。まだ録音中です。「■ 停止」を押してください！', 'recording');
+  };
+  synth.speak(utterance);
+}
+
+function stopSession() {
+  isRecording = false;
+  synth.cancel();
+
+  if(uploadedAudio) { uploadedAudio.pause(); uploadedAudio.currentTime = 0; }
+
+  // Stop recognition
+  if(recognition) {
+    try { recognition.abort(); } catch(e) {}
+    recognition = null;
+  }
+
+  // Stop MediaRecorder
+  if(mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
     mediaRecorder.stream.getTracks().forEach(t => t.stop());
   }
 
+  // Update UI
   document.getElementById('btn-start').disabled = false;
   document.getElementById('btn-stop').disabled = true;
   document.getElementById('btn-replay').disabled = false;
   setStatus('完了！スコアを計算中…', '');
-}
 
-function finishSession() {
-  // Give a moment for any last transcript to arrive
+  // Score after short delay
   setTimeout(() => {
     computeScore();
     showPanel('score');
-  }, 800);
+  }, 500);
 }
 
 function replayAudio() {
