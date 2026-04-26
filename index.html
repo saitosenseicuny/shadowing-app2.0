@@ -553,26 +553,15 @@ async function startSession() {
   recordedChunks = [];
   isRecording = true;
 
-  // UI: enable stop, disable start
   document.getElementById('btn-start').disabled = true;
   document.getElementById('btn-stop').disabled = false;
   document.getElementById('btn-replay').disabled = true;
 
-  // 1) Start microphone recording
+  // Get mic
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if(e.data.size > 0) recordedChunks.push(e.data); };
-    mediaRecorder.onstop = () => {
-      if(recordedChunks.length > 0) {
-        const blob = new Blob(recordedChunks, { type: 'audio/webm' });
-        const url = URL.createObjectURL(blob);
-        const audioEl = document.getElementById('recorded-audio');
-        audioEl.src = url;
-        audioEl.load();
-        document.getElementById('recorded-audio-section').style.display = 'block';
-      }
-    };
     mediaRecorder.start(500);
   } catch(err) {
     setStatus('マイクへのアクセスが拒否されました。アドレスバー横の🔒からマイクを許可してください。', '');
@@ -582,53 +571,15 @@ async function startSession() {
     return;
   }
 
-  // 2) Start speech recognition
-  startSpeechRecognition();
-
-  // 3) Play TTS or uploaded audio
+  // Play TTS or uploaded audio
   if(currentTab === 'tts' && targetText) {
-    setStatus('🔴 録音中 ＋ 再生中… 終わったら「停止」を押してください', 'recording');
+    setStatus('🔴 録音中 ＋ 再生中… 読み終わったら「■ 停止」を押してください', 'recording');
     speakText(targetText);
   } else if(uploadedAudio) {
-    setStatus('🔴 録音中 ＋ 再生中… 終わったら「停止」を押してください', 'recording');
+    setStatus('🔴 録音中 ＋ 再生中… 読み終わったら「■ 停止」を押してください', 'recording');
     uploadedAudio.currentTime = 0;
     uploadedAudio.play();
   }
-}
-
-function startSpeechRecognition() {
-  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) return;
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = new SR();
-  recognition.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.maxAlternatives = 1;
-
-  recognition.onresult = (e) => {
-    let finalText = '';
-    let interimText = '';
-    for(let i = 0; i < e.results.length; i++) {
-      if(e.results[i].isFinal) finalText += e.results[i][0].transcript;
-      else interimText += e.results[i][0].transcript;
-    }
-    transcribedText = finalText;
-    const display = finalText + interimText;
-    if(display) setStatus('🔴 認識中: ' + display.slice(-30) + '…', 'recording');
-  };
-
-  recognition.onerror = (e) => {
-    if(e.error !== 'no-speech') console.warn('Recognition error:', e.error);
-  };
-
-  recognition.onend = () => {
-    // If still recording, restart automatically
-    if(isRecording && recognition) {
-      try { recognition.start(); } catch(ex) {}
-    }
-  };
-
-  try { recognition.start(); } catch(e) {}
 }
 
 function speakText(text) {
@@ -636,7 +587,6 @@ function speakText(text) {
   utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
   utterance.rate = parseFloat(document.getElementById('speed-slider').value);
-
   let wordIdx = 0;
   utterance.onboundary = (e) => {
     if(e.name === 'word' && wordIdx < wordSpans.length) {
@@ -647,10 +597,9 @@ function speakText(text) {
       wordIdx++;
     }
   };
-  // TTS ending does NOT auto-stop — user must press 停止
   utterance.onend = () => {
     wordSpans.forEach(sp => { sp.classList.remove('highlighted'); sp.classList.add('done'); });
-    setStatus('🔴 再生終了。まだ録音中です。「■ 停止」を押してください！', 'recording');
+    setStatus('🔴 再生終了。「■ 停止」を押してください！', 'recording');
   };
   synth.speak(utterance);
 }
@@ -658,32 +607,107 @@ function speakText(text) {
 function stopSession() {
   isRecording = false;
   synth.cancel();
-
   if(uploadedAudio) { uploadedAudio.pause(); uploadedAudio.currentTime = 0; }
 
-  // Stop recognition
-  if(recognition) {
-    try { recognition.abort(); } catch(e) {}
-    recognition = null;
-  }
-
-  // Stop MediaRecorder
-  if(mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-    mediaRecorder.stream.getTracks().forEach(t => t.stop());
-  }
-
-  // Update UI
   document.getElementById('btn-start').disabled = false;
   document.getElementById('btn-stop').disabled = true;
   document.getElementById('btn-replay').disabled = false;
-  setStatus('完了！スコアを計算中…', '');
 
-  // Score after short delay
-  setTimeout(() => {
+  if(mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.onstop = () => {
+      if(recordedChunks.length > 0) {
+        recordedBlob = new Blob(recordedChunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(recordedBlob);
+        const audioEl = document.getElementById('recorded-audio');
+        audioEl.src = url;
+        audioEl.load();
+        document.getElementById('recorded-audio-section').style.display = 'block';
+        // Now transcribe the recording
+        transcribeRecording(recordedBlob);
+      }
+    };
+    mediaRecorder.stop();
+    mediaRecorder.stream.getTracks().forEach(t => t.stop());
+  } else {
+    transcribeRecording(null);
+  }
+  setStatus('⏳ 録音完了。音声を解析中…', '');
+}
+
+// Transcribe after recording using Web Speech API on the recorded audio
+function transcribeRecording(blob) {
+  const target = targetText || document.getElementById('upload-script-input').value.trim();
+  if(!target) {
+    showPanel('score');
+    computeScore();
+    return;
+  }
+
+  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+    setStatus('音声認識非対応ブラウザです。Chrome推奨。', '');
+    showPanel('score');
+    computeScore();
+    return;
+  }
+
+  setStatus('⏳ 音声を文字起こし中…', '');
+
+  // Play recorded audio silently and run speech recognition simultaneously
+  // Use a fresh audio element to play back the recording
+  if(!blob) {
+    showPanel('score');
+    computeScore();
+    return;
+  }
+
+  const url = URL.createObjectURL(blob);
+  const playbackAudio = new Audio(url);
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const rec = new SR();
+  rec.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
+  rec.continuous = true;
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+
+  let finalText = '';
+
+  rec.onresult = (e) => {
+    for(let i = e.resultIndex; i < e.results.length; i++) {
+      if(e.results[i].isFinal) finalText += e.results[i][0].transcript;
+    }
+    setStatus('⏳ 認識中: ' + finalText.slice(-30) + '…', '');
+  };
+
+  rec.onend = () => {
+    transcribedText = finalText;
     computeScore();
     showPanel('score');
-  }, 500);
+  };
+
+  rec.onerror = (e) => {
+    console.warn('Transcription error:', e.error);
+    // Even on error, show score with whatever we got
+    transcribedText = finalText;
+    computeScore();
+    showPanel('score');
+  };
+
+  // Start recognition first, then play audio
+  try {
+    rec.start();
+    setTimeout(() => {
+      playbackAudio.volume = 0.01; // near-silent playback
+      playbackAudio.play().catch(() => {});
+      playbackAudio.onended = () => {
+        setTimeout(() => { try { rec.stop(); } catch(e) {} }, 1000);
+      };
+    }, 300);
+  } catch(e) {
+    transcribedText = finalText;
+    computeScore();
+    showPanel('score');
+  }
 }
 
 function replayAudio() {
