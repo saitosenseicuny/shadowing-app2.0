@@ -558,24 +558,24 @@ async function startSession() {
   document.getElementById('btn-stop').style.opacity = '1'; document.getElementById('btn-stop').style.pointerEvents = 'auto';
   document.getElementById('btn-replay').disabled = true;
 
-  // Get mic
+  // Step 1: Start SpeechRecognition FIRST (before mic stream)
+  // This ensures it gets mic access before MediaRecorder
+  const srStarted = await startSpeechRecognition();
+
+  // Step 2: Start MediaRecorder AFTER recognition has mic access
+  // Small delay to let SR initialize
+  await new Promise(r => setTimeout(r, 500));
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if(e.data.size > 0) recordedChunks.push(e.data); };
     mediaRecorder.start(500);
   } catch(err) {
-    setStatus('マイクへのアクセスが拒否されました。アドレスバー横の🔒からマイクを許可してください。', '');
-    isRecording = false;
-    document.getElementById('btn-start').disabled = false;
-    document.getElementById('btn-stop').style.opacity = '0.4'; document.getElementById('btn-stop').style.pointerEvents = 'none';
-    return;
+    // Recording failed but SR might still work — continue anyway
+    console.warn('MediaRecorder failed:', err);
   }
 
-  // Speech recognition — non-blocking, runs in background
-  startSpeechRecognition();
-
-  // Play TTS or uploaded audio
+  // Step 3: Play TTS or uploaded audio
   if(currentTab === 'tts' && targetText) {
     setStatus('🔴 録音中… 読み終わったら「■ 停止」を押してください', 'recording');
     speakText(targetText);
@@ -587,40 +587,51 @@ async function startSession() {
 }
 
 function startSpeechRecognition() {
-  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) return;
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = new SR();
-  recognition.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.maxAlternatives = 1;
+  return new Promise((resolve) => {
+    if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+      resolve(false);
+      return;
+    }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SR();
+    recognition.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
 
-  recognition.onresult = (e) => {
-    for(let i = e.resultIndex; i < e.results.length; i++) {
-      if(e.results[i].isFinal) {
-        transcribedText += e.results[i][0].transcript;
+    recognition.onstart = () => {
+      resolve(true); // SR has mic — safe to start MediaRecorder now
+    };
+
+    recognition.onresult = (e) => {
+      for(let i = e.resultIndex; i < e.results.length; i++) {
+        if(e.results[i].isFinal) {
+          transcribedText += e.results[i][0].transcript;
+        }
       }
+      setStatus('🔴 認識中: ' + transcribedText.slice(-30) + '…', 'recording');
+    };
+
+    recognition.onerror = (e) => {
+      console.warn('SR error:', e.error);
+      resolve(false); // resolve even on error so session can continue
+    };
+
+    recognition.onend = () => {
+      if(isRecording) {
+        try { recognition.start(); } catch(ex) {}
+      }
+    };
+
+    try {
+      recognition.start();
+      // Fallback resolve in case onstart never fires
+      setTimeout(() => resolve(true), 1000);
+    } catch(e) {
+      console.warn('SR start failed:', e);
+      resolve(false);
     }
-    setStatus('🔴 認識中: ' + transcribedText.slice(-30) + '…', 'recording');
-  };
-
-  recognition.onerror = (e) => {
-    // silently ignore all errors — stop button still works
-    console.warn('SR error (ignored):', e.error);
-  };
-
-  recognition.onend = () => {
-    // Only auto-restart if still actively recording
-    if(isRecording) {
-      try { recognition.start(); } catch(ex) { /* ignore */ }
-    }
-  };
-
-  try {
-    recognition.start();
-  } catch(e) {
-    console.warn('SR start failed:', e);
-  }
+  });
 }
 
 function speakText(text) {
