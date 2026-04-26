@@ -571,6 +571,9 @@ async function startSession() {
     return;
   }
 
+  // Start speech recognition simultaneously
+  startSpeechRecognition();
+
   // Play TTS or uploaded audio
   if(currentTab === 'tts' && targetText) {
     setStatus('🔴 録音中 ＋ 再生中… 読み終わったら「■ 停止」を押してください', 'recording');
@@ -580,6 +583,38 @@ async function startSession() {
     uploadedAudio.currentTime = 0;
     uploadedAudio.play();
   }
+}
+
+function startSpeechRecognition() {
+  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  recognition.onresult = (e) => {
+    let finalText = '';
+    for(let i = 0; i < e.results.length; i++) {
+      if(e.results[i].isFinal) finalText += e.results[i][0].transcript;
+    }
+    if(finalText) transcribedText = finalText;
+    setStatus('🔴 認識中: ' + (transcribedText || '').slice(-30) + '…', 'recording');
+  };
+
+  recognition.onerror = (e) => {
+    if(e.error === 'no-speech') return;
+    console.warn('Recognition error:', e.error);
+  };
+
+  recognition.onend = () => {
+    if(isRecording) {
+      try { recognition.start(); } catch(ex) {}
+    }
+  };
+
+  try { recognition.start(); } catch(e) {}
 }
 
 function speakText(text) {
@@ -609,10 +644,18 @@ function stopSession() {
   synth.cancel();
   if(uploadedAudio) { uploadedAudio.pause(); uploadedAudio.currentTime = 0; }
 
+  // Stop speech recognition — grab whatever text we have right now
+  if(recognition) {
+    try { recognition.abort(); } catch(e) {}
+    recognition = null;
+  }
+
   document.getElementById('btn-start').disabled = false;
   document.getElementById('btn-stop').disabled = true;
   document.getElementById('btn-replay').disabled = false;
+  setStatus('✅ 完了！スコアを計算中…', '');
 
+  // Save recording for playback
   if(mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.onstop = () => {
       if(recordedChunks.length > 0) {
@@ -622,92 +665,17 @@ function stopSession() {
         audioEl.src = url;
         audioEl.load();
         document.getElementById('recorded-audio-section').style.display = 'block';
-        // Now transcribe the recording
-        transcribeRecording(recordedBlob);
       }
     };
     mediaRecorder.stop();
     mediaRecorder.stream.getTracks().forEach(t => t.stop());
-  } else {
-    transcribeRecording(null);
-  }
-  setStatus('⏳ 録音完了。音声を解析中…', '');
-}
-
-// Transcribe after recording using Web Speech API on the recorded audio
-function transcribeRecording(blob) {
-  const target = targetText || document.getElementById('upload-script-input').value.trim();
-  if(!target) {
-    showPanel('score');
-    computeScore();
-    return;
   }
 
-  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-    setStatus('音声認識非対応ブラウザです。Chrome推奨。', '');
-    showPanel('score');
-    computeScore();
-    return;
-  }
-
-  setStatus('⏳ 音声を文字起こし中…', '');
-
-  // Play recorded audio silently and run speech recognition simultaneously
-  // Use a fresh audio element to play back the recording
-  if(!blob) {
-    showPanel('score');
-    computeScore();
-    return;
-  }
-
-  const url = URL.createObjectURL(blob);
-  const playbackAudio = new Audio(url);
-
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const rec = new SR();
-  rec.lang = currentLang === 'ja' ? 'ja-JP' : 'en-US';
-  rec.continuous = true;
-  rec.interimResults = false;
-  rec.maxAlternatives = 1;
-
-  let finalText = '';
-
-  rec.onresult = (e) => {
-    for(let i = e.resultIndex; i < e.results.length; i++) {
-      if(e.results[i].isFinal) finalText += e.results[i][0].transcript;
-    }
-    setStatus('⏳ 認識中: ' + finalText.slice(-30) + '…', '');
-  };
-
-  rec.onend = () => {
-    transcribedText = finalText;
+  // Use transcribed text collected during practice, go to score
+  setTimeout(() => {
     computeScore();
     showPanel('score');
-  };
-
-  rec.onerror = (e) => {
-    console.warn('Transcription error:', e.error);
-    // Even on error, show score with whatever we got
-    transcribedText = finalText;
-    computeScore();
-    showPanel('score');
-  };
-
-  // Start recognition first, then play audio
-  try {
-    rec.start();
-    setTimeout(() => {
-      playbackAudio.volume = 0.01; // near-silent playback
-      playbackAudio.play().catch(() => {});
-      playbackAudio.onended = () => {
-        setTimeout(() => { try { rec.stop(); } catch(e) {} }, 1000);
-      };
-    }, 300);
-  } catch(e) {
-    transcribedText = finalText;
-    computeScore();
-    showPanel('score');
-  }
+  }, 400);
 }
 
 function replayAudio() {
