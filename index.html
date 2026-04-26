@@ -331,7 +331,7 @@ audio { width: 100%; margin-top: 8px; border-radius: var(--radius); }
       <button class="btn primary" id="btn-start" onclick="startSession()">
         <span class="btn-icon">🎙</span> 再生 ＋ 録音開始
       </button>
-      <button class="btn danger" id="btn-stop" onclick="stopSession()" disabled>
+      <button class="btn danger" id="btn-stop" onclick="stopSession()">
         <span class="btn-icon">■</span> 停止
       </button>
       <button class="btn" id="btn-replay" onclick="replayAudio()" disabled>
@@ -484,7 +484,7 @@ function goToSubmit() {
 }
 function retryPractice() {
   document.getElementById('btn-start').disabled = false;
-  document.getElementById('btn-stop').disabled = true;
+  document.getElementById('btn-stop').style.opacity = '0.4'; document.getElementById('btn-stop').style.pointerEvents = 'none';
   document.getElementById('btn-replay').disabled = true;
   setStatus('「再生 ＋ 録音開始」を押してスタート', '');
   showPanel('practice');
@@ -553,8 +553,9 @@ async function startSession() {
   recordedChunks = [];
   isRecording = true;
 
+  // UI — stop button always enabled once recording starts
   document.getElementById('btn-start').disabled = true;
-  document.getElementById('btn-stop').disabled = false;
+  document.getElementById('btn-stop').style.opacity = '1'; document.getElementById('btn-stop').style.pointerEvents = 'auto';
   document.getElementById('btn-replay').disabled = true;
 
   // Get mic
@@ -567,19 +568,19 @@ async function startSession() {
     setStatus('マイクへのアクセスが拒否されました。アドレスバー横の🔒からマイクを許可してください。', '');
     isRecording = false;
     document.getElementById('btn-start').disabled = false;
-    document.getElementById('btn-stop').disabled = true;
+    document.getElementById('btn-stop').style.opacity = '0.4'; document.getElementById('btn-stop').style.pointerEvents = 'none';
     return;
   }
 
-  // Start speech recognition simultaneously
+  // Speech recognition — non-blocking, runs in background
   startSpeechRecognition();
 
   // Play TTS or uploaded audio
   if(currentTab === 'tts' && targetText) {
-    setStatus('🔴 録音中 ＋ 再生中… 読み終わったら「■ 停止」を押してください', 'recording');
+    setStatus('🔴 録音中… 読み終わったら「■ 停止」を押してください', 'recording');
     speakText(targetText);
   } else if(uploadedAudio) {
-    setStatus('🔴 録音中 ＋ 再生中… 読み終わったら「■ 停止」を押してください', 'recording');
+    setStatus('🔴 録音中… 読み終わったら「■ 停止」を押してください', 'recording');
     uploadedAudio.currentTime = 0;
     uploadedAudio.play();
   }
@@ -595,26 +596,31 @@ function startSpeechRecognition() {
   recognition.maxAlternatives = 1;
 
   recognition.onresult = (e) => {
-    let finalText = '';
-    for(let i = 0; i < e.results.length; i++) {
-      if(e.results[i].isFinal) finalText += e.results[i][0].transcript;
+    for(let i = e.resultIndex; i < e.results.length; i++) {
+      if(e.results[i].isFinal) {
+        transcribedText += e.results[i][0].transcript;
+      }
     }
-    if(finalText) transcribedText = finalText;
-    setStatus('🔴 認識中: ' + (transcribedText || '').slice(-30) + '…', 'recording');
+    setStatus('🔴 認識中: ' + transcribedText.slice(-30) + '…', 'recording');
   };
 
   recognition.onerror = (e) => {
-    if(e.error === 'no-speech') return;
-    console.warn('Recognition error:', e.error);
+    // silently ignore all errors — stop button still works
+    console.warn('SR error (ignored):', e.error);
   };
 
   recognition.onend = () => {
+    // Only auto-restart if still actively recording
     if(isRecording) {
-      try { recognition.start(); } catch(ex) {}
+      try { recognition.start(); } catch(ex) { /* ignore */ }
     }
   };
 
-  try { recognition.start(); } catch(e) {}
+  try {
+    recognition.start();
+  } catch(e) {
+    console.warn('SR start failed:', e);
+  }
 }
 
 function speakText(text) {
@@ -651,19 +657,20 @@ function stopSession() {
   }
 
   document.getElementById('btn-start').disabled = false;
-  document.getElementById('btn-stop').disabled = true;
+  document.getElementById('btn-stop').style.opacity = '0.4'; document.getElementById('btn-stop').style.pointerEvents = 'none';
   document.getElementById('btn-replay').disabled = false;
   setStatus('✅ 完了！スコアを計算中…', '');
 
-  // Save recording for playback
+  // Stop MediaRecorder — recording saved separately from score
   if(mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.onstop = () => {
+      // Just save the blob silently — do NOT autoplay
       if(recordedChunks.length > 0) {
         recordedBlob = new Blob(recordedChunks, { type: 'audio/webm' });
         const url = URL.createObjectURL(recordedBlob);
         const audioEl = document.getElementById('recorded-audio');
         audioEl.src = url;
-        audioEl.load();
+        // Do NOT call audioEl.load() or play() here
         document.getElementById('recorded-audio-section').style.display = 'block';
       }
     };
@@ -671,11 +678,9 @@ function stopSession() {
     mediaRecorder.stream.getTracks().forEach(t => t.stop());
   }
 
-  // Use transcribed text collected during practice, go to score
-  setTimeout(() => {
-    computeScore();
-    showPanel('score');
-  }, 400);
+  // Score runs immediately — independent of recording save
+  computeScore();
+  showPanel('score');
 }
 
 function replayAudio() {
